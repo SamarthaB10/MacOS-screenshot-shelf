@@ -192,7 +192,8 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     (void)notification;
     [self createPanel];
     [self createMenu];
-    [self installFastCapture];
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--request-permissions"]) [self enableFastCapture:nil];
+    else [self installFastCapture];
     // Permission prompts must come from an explicit setup action, not every launch.
     int descriptor = open(self.capture.fileSystemRepresentation, O_EVTONLY);
     if (descriptor < 0) {
