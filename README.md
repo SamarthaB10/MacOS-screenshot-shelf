@@ -2,24 +2,28 @@
 
 Take a screenshot with **Command–Shift–4**. A native Liquid Glass widget holds it on the display where you captured it. Drag it into another app, press the large green check to keep it, or press × to delete it.
 
-## Download — no Rust installation needed
+## Install from Terminal — no Rust or build tools needed
 
-Requires **Apple silicon and macOS 26**.
+Requires **Apple silicon and macOS 26 or newer**. Open Terminal, paste this command, then press Return:
 
-1. Open [app downloads](https://github.com/SamarthaB10/MacOS-screenshot-shelf/actions/workflows/build.yml). Sign in to GitHub if needed.
-2. Open the latest successful **Build macOS app** run for `main`.
-3. Under **Artifacts**, download **Screenshot-Shelf-macos-arm64**.
-4. Expand the downloaded artifact ZIP, then expand **Screenshot-Shelf-macos-arm64.zip** inside it.
-5. Move **Screenshot Shelf.app** to **Applications** and open it.
+```sh
+/usr/bin/curl -fsSL https://raw.githubusercontent.com/SamarthaB10/MacOS-screenshot-shelf/main/scripts/install-latest.sh | /bin/bash
+```
 
-The first build uses a local ad-hoc signature. It is not signed with an Apple Developer ID or notarized. If macOS blocks it, follow [Apple's instructions for opening an app you trust](https://support.apple.com/102445). Do not disable Gatekeeper globally.
+The installer downloads the latest successful macOS build, puts **Screenshot Shelf.app** in `~/Applications`, opens it, and starts the permission prompts. It does not install Rust or build the app. It needs an internet connection, but no GitHub account. If there is no available build, ask the app owner to run **Build macOS app** from [GitHub Actions](https://github.com/SamarthaB10/MacOS-screenshot-shelf/actions/workflows/build.yml).
 
-## First launch
+### Allow screenshot access
 
-1. Select **Enable fast capture…** from the menu-bar icon, then allow **Screenshot Shelf** in **System Settings → Privacy & Security → Accessibility** and **Screen Recording** (called **Screen & System Audio Recording** on some macOS versions).
-2. Quit and reopen the app after granting access if macOS asks you to do so.
-3. Use the menu-bar icon to choose a save folder. Otherwise, saved images go to `~/Pictures/Screenshot Shelf/Saved`.
-4. Press **Command–Shift–4** and select a region. The widget appears when the capture completes.
+1. When macOS asks, open **System Settings** and allow **Screenshot Shelf** under **Privacy & Security → Accessibility**.
+2. Also allow it under **Privacy & Security → Screen & System Audio Recording**. The name can differ on older macOS versions.
+3. If macOS asks you to quit and reopen the app, do that. The menu-bar menu shows **Fast capture ready** when setup is complete.
+4. Press **Command–Shift–4** and select a region. The widget appears when capture completes.
+
+If the permission prompts do not appear, open the menu-bar icon and select **Enable fast capture…**. The app needs both permissions to intercept the shortcut and capture the screen.
+
+This build is ad-hoc signed and is not notarized by Apple. If macOS blocks the first open, follow [Apple's steps to open an app you trust](https://support.apple.com/102445).
+
+Use the menu-bar icon to choose a save folder. By default, saved images go to `~/Pictures/Screenshot Shelf/Saved`.
 
 The app intercepts Command–Shift–4 only while it is running and has the required permissions. Other macOS screenshot shortcuts keep their normal behavior. You can also use **Take screenshot** from the menu. The widget starts on the capture display and can be moved by dragging its background.
 

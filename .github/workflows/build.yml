@@ -31,4 +31,4 @@ jobs:
           name: Screenshot-Shelf-macos-arm64
           path: dist/Screenshot-Shelf-macos-arm64.zip
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
