@@ -16,14 +16,14 @@ The first build uses a local ad-hoc signature. It is not signed with an Apple De
 
 ## First launch
 
-1. Allow **Screenshot Shelf** in **System Settings → Privacy & Security → Accessibility** and **Screen Recording** (called **Screen & System Audio Recording** on some macOS versions).
+1. Select **Enable fast capture…** from the menu-bar icon, then allow **Screenshot Shelf** in **System Settings → Privacy & Security → Accessibility** and **Screen Recording** (called **Screen & System Audio Recording** on some macOS versions).
 2. Quit and reopen the app after granting access if macOS asks you to do so.
 3. Use the menu-bar icon to choose a save folder. Otherwise, saved images go to `~/Pictures/Screenshot Shelf/Saved`.
 4. Press **Command–Shift–4** and select a region. The widget appears when the capture completes.
 
 The app intercepts Command–Shift–4 only while it is running and has the required permissions. Other macOS screenshot shortcuts keep their normal behavior. You can also use **Take screenshot** from the menu. The widget starts on the capture display and can be moved by dragging its background.
 
-If fast capture is not enabled, choose **Enable fast capture…** from the menu. The app also watches the configured macOS screenshot folder as a fallback. That fallback can be delayed by the macOS floating thumbnail; direct capture bypasses it. Clipboard-only screenshots are not imported.
+The menu shows **Fast capture ready** when the shortcut is active. If fast capture is not enabled, choose **Enable fast capture…** from the menu. After fast capture is enabled, the app also watches the configured macOS screenshot folder for other file-based screenshot shortcuts. It does not silently use that slower path while permissions are missing. That fallback can be delayed by the macOS floating thumbnail; direct capture bypasses it. Clipboard-only screenshots are not imported.
 
 ## Use
 
@@ -91,3 +91,15 @@ For folder diagnostics:
 ```
 
 No unit or integration tests are included, as requested. See [requirements](docs/REQUIREMENTS.md), [verification](docs/VERIFICATION.md), and [design decisions](docs/adr/).
+
+## Keep it running and keep permissions
+
+Keep one installed copy in **Applications**. Select **Start at login** from the menu. The app stays in the menu bar when the widget is empty. It does not need an open widget to capture.
+
+The app no longer asks for permissions on every launch. Use **Enable fast capture…** only when needed. Moving the app or installing a different ad-hoc development build can cause macOS to request access again. A build signed with the same Apple signing identity has a stable code identity. If you have a signing certificate, build with:
+
+```sh
+SHELF_SIGNING_IDENTITY='Your Apple signing identity' ./scripts/build-app.sh
+```
+
+GitHub builds use an ad-hoc signature unless a release signing service is configured. A Developer ID signature and notarization are needed for normal public distribution.

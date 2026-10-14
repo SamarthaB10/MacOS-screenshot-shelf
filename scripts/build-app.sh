@@ -25,7 +25,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 PLIST
 # Sign outside synced folders, where Finder metadata can invalidate a bundle.
 xattr -cr "$app"
-codesign --force --sign - "$app"
+codesign --force --sign "${SHELF_SIGNING_IDENTITY:--}" "$app"
 codesign --verify --deep --strict "$app"
 ditto --norsrc --noextattr --noqtn -c -k --keepParent "$app" dist/Screenshot-Shelf-macos-arm64.zip
 # Replace the generated bundle by rename. Never rewrite the executable of a

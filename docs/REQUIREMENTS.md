@@ -5,7 +5,7 @@
 - Native macOS app. Rust owns pending state, files, and lifetime. A small AppKit adapter owns native controls, capture, and drag sessions. No webview or third-party runtime packages.
 - First version targets Apple silicon with macOS 26 and native Liquid Glass.
 - Primary capture intercepts Command–Shift–4 after Accessibility and Screen Recording approval. Use native region selection and capture directly into temporary app storage. Bypass the floating-thumbnail and Desktop-file flow.
-- Retain a folder watcher as a fallback for normal macOS screenshot files. Detect the configured screenshot folder automatically, ignore old files, and take only files marked as screenshots. Clipboard-only capture is outside the first version.
+- Retain a folder watcher for other normal macOS screenshot files after fast capture is enabled. Do not silently use the slower watcher while fast-capture permissions are missing. Detect the configured screenshot folder automatically, ignore old files, and take only files marked as screenshots. Clipboard-only capture is outside the first version.
 - Show a widget only when screenshots are pending. Show the newest image, a count, and previous/next controls. Keep older pending images available.
 - Show the widget on the capture display. Use screenshot rectangle metadata, with the pointer display as a fallback. A new capture can move the widget to a different display.
 - Use native Liquid Glass. Start in the lower-right corner. Let the user move it. Keep it above normal windows and available across spaces and beside full-screen apps. Do not take keyboard focus when it appears.
@@ -23,3 +23,7 @@
 Idle memory: 30 MB. Widget-open memory: 80 MB. Installed app: below 20 MB, excluding screenshots. Preview: within 300 ms after a capture image is ready.
 
 These are targets to measure, not guarantees. Native framework memory and receiving-app behavior can vary. Direct capture is detected through process completion, so PNG creation must complete before the preview can appear.
+
+## Installed app stability
+
+Use one installed app in Applications. Enable Start at login through the native service. Do not request permissions automatically on every launch. Show whether fast capture is ready in the menu. A local build can use the user's existing Apple signing identity; public CI downloads remain ad-hoc signed.
