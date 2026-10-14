@@ -90,6 +90,17 @@ impl State {
         let save = fs::read_to_string(root.join("save-folder"))
             .map(PathBuf::from)
             .unwrap_or(default_save);
+        let transfer = root.join("Transfer");
+        fs::create_dir_all(&transfer)?;
+        for path in image_paths(&transfer)? {
+            let age = fs::metadata(&path)?
+                .modified()?
+                .elapsed()
+                .unwrap_or_default();
+            if age >= Duration::from_secs(60) {
+                fs::remove_file(path)?;
+            }
+        }
         let pending = image_paths(&root.join("Pending"))?;
         let last_action = fs::read_to_string(root.join("last-action"))
             .ok()
