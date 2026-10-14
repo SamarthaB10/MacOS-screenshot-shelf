@@ -11,7 +11,7 @@ An image of all or part of the screen.
 The small screen panel that holds pending screenshots.
 
 **Capture folder**:
-The separate folder where macOS writes new screenshots for the shelf.
+The folder where the active capture path writes an image before the shelf takes it.
 
 **Pending screenshot**:
 A screenshot held by the shelf that the user has not transferred, saved, or deleted.
@@ -30,3 +30,6 @@ The user's command to delete the selected pending screenshot.
 
 **Idle period**:
 The time since the last capture or widget action.
+
+**Transfer file**:
+A short-lived image file supplied to a receiving app during a drop. It is separate from the pending screenshot.

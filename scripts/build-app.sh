@@ -3,8 +3,10 @@ set -eu
 cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=26.0
 cargo build --release
-app="dist/Screenshot Shelf.app"
-mkdir -p "$app/Contents/MacOS"
+shelf_stage=$(mktemp -d /private/tmp/screenshot-shelf.XXXXXX)
+trap 'rm -r "$shelf_stage"' EXIT HUP INT TERM
+app="$shelf_stage/Screenshot Shelf.app"
+mkdir -p "$app/Contents/MacOS" dist
 cp -X target/release/screenshot-shelf "$app/Contents/MacOS/Screenshot Shelf"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -21,7 +23,19 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-# Clear Finder metadata only from this generated app bundle before signing.
+# Sign outside synced folders, where Finder metadata can invalidate a bundle.
 xattr -cr "$app"
 codesign --force --sign - "$app"
-printf 'Built: %s\n' "$app"
+codesign --verify --deep --strict "$app"
+ditto --norsrc --noextattr --noqtn -c -k --keepParent "$app" dist/Screenshot-Shelf-macos-arm64.zip
+# Replace the generated bundle by rename. Never rewrite the executable of a
+# running app in place; macOS can terminate it when its signed pages change.
+shelf_next="dist/.shelf-next-$$.app"
+shelf_previous="dist/.shelf-previous-$$.app"
+ditto --norsrc --noextattr --noqtn "$app" "$shelf_next"
+if [ -d 'dist/Screenshot Shelf.app' ]; then
+    mv 'dist/Screenshot Shelf.app' "$shelf_previous"
+fi
+mv "$shelf_next" 'dist/Screenshot Shelf.app'
+if [ -d "$shelf_previous" ]; then rm -r "$shelf_previous"; fi
+printf 'Built: dist/Screenshot Shelf.app\nDownload: dist/Screenshot-Shelf-macos-arm64.zip\n'
