@@ -26,6 +26,7 @@ The app watches only its capture folder. It ignores images already in that folde
 
 The widget appears only when a screenshot is waiting. It stays above normal windows and follows desktop spaces. Drag its background to move it.
 
+- Drag the preview into a receiving app to use the image. An accepted drop deletes the source immediately. A cancelled or rejected drop keeps it.
 - Use the arrows to select an image.
 - Press the large green check to save that image in your chosen folder.
 - Press × to delete that image.
@@ -34,7 +35,7 @@ The widget appears only when a screenshot is waiting. It stays above normal wind
 
 There is no recovery copy. Quitting stops cleanup; expired pending images are deleted when you reopen the app. Saved images are never part of timeout cleanup. The original capture file moves into the app's pending folder after it is ready.
 
-Native drag-and-drop is delivered in the next pull request. The final flow deletes the source immediately after an accepted drop. macOS does not confirm that a website has finished reading or uploading the file; some receiving apps can therefore fail after immediate source deletion.
+The native drag session supplies a file URL and a bounded thumbnail. It does not decode the full image for the widget. macOS does not confirm that a website has finished reading or uploading the file; some receiving apps can therefore fail after immediate source deletion.
 
 ## Checks
 

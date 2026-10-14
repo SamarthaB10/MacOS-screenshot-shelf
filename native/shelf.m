@@ -10,8 +10,9 @@ extern void rs_tick(void);
 extern void rs_restore(void);
 extern void rs_save_folder(const char *path);
 
-@interface ShelfPreview : NSImageView
+@interface ShelfPreview : NSImageView <NSDraggingSource>
 @property(copy) NSString *path;
+@property(strong) NSURL *dragURL;
 @end
 
 @interface ShelfDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -36,6 +37,24 @@ static ShelfDelegate *app;
 - (void)mouseDown:(NSEvent *)event {
     (void)event;
     rs_action(7);
+}
+- (void)mouseDragged:(NSEvent *)event {
+    if (!self.path || self.dragURL) return;
+    self.dragURL = [NSURL fileURLWithPath:self.path];
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:self.dragURL];
+    [item setDraggingFrame:self.bounds contents:self.image];
+    rs_action(4);
+    NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item] event:event source:self];
+    session.animatesToStartingPositionsOnCancelOrFail = YES;
+}
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    (void)session; (void)context;
+    return NSDragOperationCopy;
+}
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
+    (void)session; (void)point;
+    rs_action(operation == NSDragOperationNone ? 5 : 6);
+    self.dragURL = nil;
 }
 @end
 
@@ -151,7 +170,7 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     if (self.scanScheduled) return;
     self.scanScheduled = YES;
     __weak ShelfDelegate *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 150 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         weakSelf.scanScheduled = NO;
         if (rs_scan()) [weakSelf scheduleScan];
     });
