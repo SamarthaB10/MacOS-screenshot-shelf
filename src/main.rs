@@ -291,6 +291,60 @@ impl State {
     }
 }
 
+/// Import the image written by the app-owned native capture task.
+///
+/// # Safety
+/// `path` must be a valid null-terminated file path for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rs_accept_capture(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let source = PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(path) }.to_bytes(),
+    ));
+    STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return 0;
+        };
+        let result = (|| -> io::Result<()> {
+            if source.parent() != Some(state.root.join("Capture").as_path())
+                || !fs::symlink_metadata(&source)?.file_type().is_file()
+                || unsafe { shelf_image_ready(cstring(&source).as_ptr()) } == 0
+            {
+                return Err(io::Error::other(
+                    "The capture did not produce a complete image.",
+                ));
+            }
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let target = state.root.join("Pending").join(format!(
+                "{stamp}-{}",
+                source.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            state.touch();
+            fs::rename(&source, &target)?;
+            unsafe { shelf_capture_arrived(cstring(&target).as_ptr()) };
+            state.pending.push(target);
+            state.selected = state.pending.len() - 1;
+            state.render();
+            Ok(())
+        })();
+        match result {
+            Ok(()) => 1,
+            Err(error) => {
+                report(error);
+                state.render();
+                0
+            }
+        }
+    })
+}
+
 // AppKit calls these functions on the main thread. The adapter never holds Rust state.
 #[unsafe(no_mangle)]
 pub extern "C" fn rs_scan() -> c_int {
