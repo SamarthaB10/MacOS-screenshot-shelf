@@ -11,6 +11,10 @@ use std::{
 const TIMEOUT: Duration = Duration::from_secs(600);
 
 unsafe extern "C" {
+    fn shelf_capture_folder() -> *const c_char;
+    fn shelf_is_capture(path: *const c_char) -> c_int;
+    fn shelf_image_ready(path: *const c_char) -> c_int;
+    fn shelf_capture_arrived(path: *const c_char);
     fn shelf_run(capture: *const c_char, save: *const c_char);
     fn shelf_render(path: *const c_char, index: usize, count: usize, bytes: u64);
     fn shelf_error(message: *const c_char);
@@ -24,8 +28,10 @@ struct State {
     selected: usize,
     known: HashSet<PathBuf>,
     candidates: HashMap<PathBuf, (u64, SystemTime)>,
+    readiness_attempts: HashMap<PathBuf, u8>,
     last_action: SystemTime,
     dragging: bool,
+    cleanup_attempt: Option<SystemTime>,
 }
 
 thread_local! {
@@ -68,7 +74,10 @@ impl State {
             std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?,
         );
         let root = home.join("Library/Application Support/Screenshot Shelf");
-        let capture = home.join("Pictures/Screenshot Shelf/Capture");
+        use std::os::unix::ffi::OsStrExt;
+        let capture = PathBuf::from(std::ffi::OsStr::from_bytes(
+            unsafe { CStr::from_ptr(shelf_capture_folder()) }.to_bytes(),
+        ));
         let default_save = home.join("Pictures/Screenshot Shelf/Saved");
         for directory in [&root, &root.join("Pending"), &capture, &default_save] {
             fs::create_dir_all(directory)?;
@@ -83,26 +92,32 @@ impl State {
             .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s)))
             .unwrap_or(UNIX_EPOCH);
         let known = image_paths(&capture)?.into_iter().collect();
+        let selected = pending.len().saturating_sub(1);
         Ok(Self {
             root,
             capture,
             save,
             pending,
-            selected: 0,
+            selected,
             known,
             candidates: HashMap::new(),
+            readiness_attempts: HashMap::new(),
             last_action,
             dragging: false,
+            cleanup_attempt: None,
         })
     }
 
     fn touch(&mut self) {
         self.last_action = SystemTime::now();
-        if let Ok(elapsed) = self.last_action.duration_since(UNIX_EPOCH)
-            && let Err(error) =
-                fs::write(self.root.join("last-action"), elapsed.as_secs().to_string())
-        {
-            report(error);
+        self.cleanup_attempt = None;
+        if let Ok(elapsed) = self.last_action.duration_since(UNIX_EPOCH) {
+            let temp = self.root.join("last-action.new");
+            let result = fs::write(&temp, elapsed.as_secs().to_string())
+                .and_then(|()| fs::rename(&temp, self.root.join("last-action")));
+            if let Err(error) = result {
+                report(error);
+            }
         }
     }
 
@@ -148,6 +163,15 @@ impl State {
         {
             return;
         }
+        if self.cleanup_attempt.is_some_and(|attempt| {
+            SystemTime::now()
+                .duration_since(attempt)
+                .unwrap_or_default()
+                < Duration::from_secs(30)
+        }) {
+            return;
+        }
+        self.cleanup_attempt = Some(SystemTime::now());
         // Delete only files owned by the app. Keep failed deletions available.
         self.pending.retain(|path| match fs::remove_file(path) {
             Ok(()) => false,
@@ -166,6 +190,8 @@ impl State {
         let present: HashSet<_> = paths.iter().cloned().collect();
         self.known.retain(|path| present.contains(path));
         self.candidates.retain(|path, _| present.contains(path));
+        self.readiness_attempts
+            .retain(|path, _| present.contains(path));
         let mut retry = false;
         let mut changed = false;
         for path in paths {
@@ -180,6 +206,21 @@ impl State {
                 retry = true;
                 continue;
             }
+            let capture_path = cstring(&path);
+            if unsafe { shelf_is_capture(capture_path.as_ptr()) } == 0
+                || unsafe { shelf_image_ready(capture_path.as_ptr()) } == 0
+            {
+                // macOS can attach metadata after the folder event. Retry briefly,
+                // then leave unmarked or invalid files untouched.
+                let attempts = self.readiness_attempts.entry(path.clone()).or_default();
+                *attempts = attempts.saturating_add(1);
+                if *attempts < 30 {
+                    retry = true;
+                } else {
+                    self.known.insert(path.clone());
+                }
+                continue;
+            }
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -189,7 +230,11 @@ impl State {
                 path.file_name().unwrap_or_default().to_string_lossy()
             ));
             fs::rename(&path, &target)?;
+            if !self.dragging {
+                unsafe { shelf_capture_arrived(cstring(&target).as_ptr()) };
+            }
             self.candidates.remove(&path);
+            self.readiness_attempts.remove(&path);
             self.pending.push(target);
             if !self.dragging {
                 self.selected = self.pending.len() - 1;
@@ -347,6 +392,12 @@ fn main() {
             return;
         }
     };
+    if std::env::args().any(|argument| argument == "--status") {
+        println!("Capture folder: {}", state.capture.display());
+        println!("Save folder: {}", state.save.display());
+        println!("Pending screenshots: {}", state.pending.len());
+        return;
+    }
     let capture = cstring(&state.capture);
     let save = cstring(&state.save);
     STATE.with(|cell| *cell.borrow_mut() = Some(state));

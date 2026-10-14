@@ -3,12 +3,49 @@
 #import <ServiceManagement/ServiceManagement.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <sys/xattr.h>
 
 extern int rs_scan(void);
 extern void rs_action(int action);
 extern void rs_tick(void);
 extern void rs_restore(void);
 extern void rs_save_folder(const char *path);
+
+// The configured folder remains owned by macOS. Return a stable UTF-8 path to Rust.
+const char *shelf_capture_folder(void) {
+    static NSString *folder;
+    @autoreleasepool {
+        id value = (__bridge_transfer id)CFPreferencesCopyAppValue(CFSTR("location"), CFSTR("com.apple.screencapture"));
+        folder = [value isKindOfClass:NSString.class] && [value length] > 0
+            ? [value stringByExpandingTildeInPath]
+            : [NSHomeDirectory() stringByAppendingPathComponent:@"Desktop"];
+        return folder.fileSystemRepresentation;
+    }
+}
+
+static id captureMetadata(const char *path, const char *key) {
+    ssize_t length = getxattr(path, key, NULL, 0, 0, XATTR_NOFOLLOW);
+    if (length <= 0 || length > 4096) return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)length];
+    if (getxattr(path, key, data.mutableBytes, data.length, 0, XATTR_NOFOLLOW) != length) return nil;
+    return [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
+}
+
+// Read the screenshot marker directly; a general image file must never be taken.
+int shelf_is_capture(const char *path) {
+    id marker = captureMetadata(path, "com.apple.metadata:kMDItemIsScreenCapture");
+    return [marker isKindOfClass:NSNumber.class] && [marker boolValue];
+}
+
+int shelf_image_ready(const char *path) {
+    NSString *file = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:path length:strlen(path)];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:file],
+        (__bridge CFDictionaryRef)@{(__bridge NSString *)kCGImageSourceShouldCache: @NO});
+    if (!source) return 0;
+    BOOL ready = CGImageSourceGetStatusAtIndex(source, 0) == kCGImageStatusComplete;
+    CFRelease(source);
+    return ready;
+}
 
 @interface ShelfPreview : NSImageView <NSDraggingSource>
 @property(copy) NSString *path;
@@ -96,9 +133,9 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     dispatch_source_set_cancel_handler(self.watcher, ^{ close(descriptor); });
     dispatch_resume(self.watcher);
     rs_restore();
-    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"setupComplete"]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf setup:nil]; });
-    }
+    // Capture works immediately. Folder selection is available from the menu;
+    // a setup modal must not stop drag actions on the first screenshot.
+    NSLog(@"Screenshot Shelf is watching the configured capture folder.");
 }
 - (void)createPanel {
     self.panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 286, 226)
@@ -176,7 +213,10 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     });
 }
 - (void)tick:(NSTimer *)timer { (void)timer; rs_tick(); }
-- (void)windowDidMove:(NSNotification *)notification { (void)notification; rs_action(7); }
+- (void)windowDidMove:(NSNotification *)notification {
+    (void)notification;
+    dispatch_async(dispatch_get_main_queue(), ^{ rs_action(7); });
+}
 - (void)previousImage:(id)sender { (void)sender; rs_action(2); }
 - (void)nextImage:(id)sender { (void)sender; rs_action(3); }
 - (void)discard:(id)sender { (void)sender; rs_action(0); }
@@ -207,7 +247,7 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Set up Screenshot Shelf";
     alert.informativeText = [NSString stringWithFormat:
-        @"1. Choose a save folder.\n2. Press Shift–Command–5. Under Options → Other Location, select:\n%@\n3. Turn off Show Floating Thumbnail for faster capture.\n\nThe app watches only this capture folder. Existing files are ignored. Clipboard-only captures are not supported.\n\nA drop or × deletes the image immediately. After 10 minutes without widget action, all pending images are deleted. There is no recovery copy.", self.capture];
+        @"Take a screenshot with Shift–Command–4 or Shift–Command–3. The app watches your current macOS screenshot folder:\n%@\n\nDrag a screenshot to use it, press the green check to keep it, or press × to delete it. After 10 minutes without action, all pending images are deleted. There is no recovery copy.\n\nChoose a save folder here or from the menu. If you change the macOS screenshot folder, reopen this app. Clipboard-only captures are not supported.", self.capture];
     [alert addButtonWithTitle:@"Choose save folder"];
     [alert addButtonWithTitle:@"Later"];
     if ([alert runModal] == NSAlertFirstButtonReturn) {
@@ -236,7 +276,34 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
 - (void)quit:(id)sender { (void)sender; [NSApp terminate:nil]; }
 @end
 
+void shelf_capture_arrived(const char *path) {
+    if (!app.panel) return;
+    NSArray *rect = captureMetadata(path, "com.apple.metadata:kMDItemScreenCaptureGlobalRect");
+    NSScreen *chosen = nil;
+    CGFloat bestArea = 0;
+    if ([rect isKindOfClass:NSArray.class] && rect.count == 4 &&
+        [rect[0] isKindOfClass:NSNumber.class] && [rect[1] isKindOfClass:NSNumber.class] &&
+        [rect[2] isKindOfClass:NSNumber.class] && [rect[3] isKindOfClass:NSNumber.class]) {
+        CGRect capture = CGRectMake([rect[0] doubleValue], [rect[1] doubleValue], [rect[2] doubleValue], [rect[3] doubleValue]);
+        for (NSScreen *screen in NSScreen.screens) {
+            CGDirectDisplayID display = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+            CGRect overlap = CGRectIntersection(capture, CGDisplayBounds(display));
+            CGFloat area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
+            if (area > bestArea) { bestArea = area; chosen = screen; }
+        }
+    }
+    if (!chosen) {
+        NSPoint pointer = NSEvent.mouseLocation;
+        for (NSScreen *screen in NSScreen.screens) if (NSPointInRect(pointer, screen.frame)) { chosen = screen; break; }
+    }
+    NSRect visible = (chosen ?: NSScreen.mainScreen).visibleFrame;
+    [app.panel setFrameOrigin:NSMakePoint(NSMaxX(visible) - app.panel.frame.size.width - 20, NSMinY(visible) + 20)];
+}
+
 void shelf_error(const char *message) {
+    static BOOL alertActive = NO;
+    if (alertActive) return;
+    alertActive = YES;
     NSString *text = [NSString stringWithUTF8String:message] ?: @"Unknown error";
     // Show errors outside a Rust callback to prevent state re-entry through a modal loop.
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -245,6 +312,7 @@ void shelf_error(const char *message) {
         alert.messageText = @"Screenshot Shelf";
         alert.informativeText = text;
         [alert runModal];
+        alertActive = NO;
     });
 }
 
