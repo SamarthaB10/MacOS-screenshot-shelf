@@ -14,7 +14,7 @@ extern void rs_save_folder(const char *path);
 @property(copy) NSString *path;
 @end
 
-@interface ShelfDelegate : NSObject <NSApplicationDelegate>
+@interface ShelfDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(strong) NSPanel *panel;
 @property(strong) ShelfPreview *preview;
 @property(strong) NSTextField *counter;
@@ -126,6 +126,7 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     [self.panel setFrameOrigin:NSMakePoint(NSMaxX(screen) - 306, NSMinY(screen) + 20)];
     [self.panel setFrameAutosaveName:@"ScreenshotShelfPosition"];
     [self.panel setFrameUsingName:@"ScreenshotShelfPosition"];
+    self.panel.delegate = self;
 }
 - (void)createMenu {
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
@@ -156,6 +157,7 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     });
 }
 - (void)tick:(NSTimer *)timer { (void)timer; rs_tick(); }
+- (void)windowDidMove:(NSNotification *)notification { (void)notification; rs_action(7); }
 - (void)previousImage:(id)sender { (void)sender; rs_action(2); }
 - (void)nextImage:(id)sender { (void)sender; rs_action(3); }
 - (void)discard:(id)sender { (void)sender; rs_action(0); }
@@ -241,7 +243,7 @@ void shelf_render(const char *path, size_t index, size_t count, uint64_t bytes) 
     if (![app.preview.path isEqualToString:file]) {
         app.preview.path = file;
         NSURL *url = [NSURL fileURLWithPath:file];
-        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, (__bridge CFDictionaryRef)@{(__bridge NSString *)kCGImageSourceShouldCache: @NO});
         if (source) {
             NSDictionary *options = @{
                 (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,

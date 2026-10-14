@@ -191,7 +191,9 @@ impl State {
             fs::rename(&path, &target)?;
             self.candidates.remove(&path);
             self.pending.push(target);
-            self.selected = self.pending.len() - 1;
+            if !self.dragging {
+                self.selected = self.pending.len() - 1;
+            }
             self.touch();
             changed = true;
         }
@@ -297,6 +299,10 @@ pub extern "C" fn rs_tick() {
     });
 }
 
+/// Set the save destination from the native folder picker.
+///
+/// # Safety
+/// `path` must point to a valid null-terminated string for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rs_save_folder(path: *const c_char) {
     if path.is_null() {
