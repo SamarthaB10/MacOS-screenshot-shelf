@@ -4,6 +4,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <sys/xattr.h>
+#import <sys/clonefile.h>
 
 extern int rs_scan(void);
 extern void rs_action(int action);
@@ -52,6 +53,7 @@ int shelf_image_ready(const char *path) {
 @interface ShelfPreview : NSImageView <NSDraggingSource>
 @property(copy) NSString *path;
 @property(strong) NSURL *dragURL;
+@property(strong) NSData *dragData;
 @end
 
 @interface ShelfDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -79,8 +81,42 @@ static ShelfDelegate *app;
 }
 - (void)mouseDragged:(NSEvent *)event {
     if (!self.path || self.dragURL) return;
-    self.dragURL = [NSURL fileURLWithPath:self.path];
-    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:self.dragURL];
+    NSString *folder = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Screenshot Shelf/Transfer"];
+    NSError *error = nil;
+    NSFileManager *files = NSFileManager.defaultManager;
+    if (![files createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error]) {
+        extern void shelf_error(const char *);
+        shelf_error(error.localizedDescription.UTF8String);
+        return;
+    }
+    NSString *name = self.path.lastPathComponent;
+    NSString *transfer = [folder stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%@", NSUUID.UUID.UUIDString, name]];
+    if (clonefile(self.path.fileSystemRepresentation, transfer.fileSystemRepresentation, 0) != 0 &&
+        ![files copyItemAtPath:self.path toPath:transfer error:&error]) {
+        extern void shelf_error(const char *);
+        shelf_error(error.localizedDescription.UTF8String);
+        return;
+    }
+    self.dragURL = [NSURL fileURLWithPath:transfer];
+    self.dragData = [NSData dataWithContentsOfURL:self.dragURL options:NSDataReadingMappedIfSafe error:&error];
+    if (!self.dragData) {
+        [files removeItemAtURL:self.dragURL error:NULL];
+        self.dragURL = nil;
+        extern void shelf_error(const char *);
+        shelf_error(error.localizedDescription.UTF8String);
+        return;
+    }
+    NSPasteboardItem *payload = [[NSPasteboardItem alloc] init];
+    // The browser can read image bytes or the independent transfer file.
+    // Neither depends on the pending source after its immediate deletion.
+    [payload setString:self.dragURL.absoluteString forType:NSPasteboardTypeFileURL];
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)self.dragData, NULL);
+    if (source) {
+        CFStringRef type = CGImageSourceGetType(source);
+        if (type) [payload setData:self.dragData forType:(__bridge NSString *)type];
+        CFRelease(source);
+    }
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:payload];
     [item setDraggingFrame:self.bounds contents:self.image];
     rs_action(4);
     NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item] event:event source:self];
@@ -92,8 +128,18 @@ static ShelfDelegate *app;
 }
 - (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
     (void)session; (void)point;
-    rs_action(operation == NSDragOperationNone ? 5 : 6);
+    NSURL *transfer = self.dragURL;
+    BOOL accepted = operation != NSDragOperationNone;
+    rs_action(accepted ? 6 : 5);
     self.dragURL = nil;
+    self.dragData = nil;
+    if (accepted) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [NSFileManager.defaultManager removeItemAtURL:transfer error:NULL];
+        });
+    } else {
+        [NSFileManager.defaultManager removeItemAtURL:transfer error:NULL];
+    }
 }
 @end
 
