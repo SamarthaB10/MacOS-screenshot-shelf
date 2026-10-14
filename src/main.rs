@@ -12,6 +12,8 @@ const TIMEOUT: Duration = Duration::from_secs(600);
 
 unsafe extern "C" {
     fn shelf_capture_folder() -> *const c_char;
+    fn shelf_schedule_transfer_cleanup(path: *const c_char, delay_ms: u64);
+    fn shelf_enable_login() -> c_int;
     fn shelf_is_capture(path: *const c_char) -> c_int;
     fn shelf_image_ready(path: *const c_char) -> c_int;
     fn shelf_capture_arrived(path: *const c_char);
@@ -75,21 +77,26 @@ impl State {
         );
         let root = home.join("Library/Application Support/Screenshot Shelf");
         use std::os::unix::ffi::OsStrExt;
-        let capture = PathBuf::from(std::ffi::OsStr::from_bytes(
+        let mut capture = PathBuf::from(std::ffi::OsStr::from_bytes(
             unsafe { CStr::from_ptr(shelf_capture_folder()) }.to_bytes(),
         ));
         let default_save = home.join("Pictures/Screenshot Shelf/Saved");
         if !capture.is_absolute() || !capture.is_dir() {
-            return Err(io::Error::other(
-                "The macOS screenshot folder is not available. Select a valid folder in Shift–Command–5 → Options.",
-            ));
+            capture = home.join("Desktop");
         }
         for directory in [&root, &root.join("Pending"), &default_save] {
             fs::create_dir_all(directory)?;
         }
-        let save = fs::read_to_string(root.join("save-folder"))
+        let mut save = fs::read_to_string(root.join("save-folder"))
             .map(PathBuf::from)
-            .unwrap_or(default_save);
+            .unwrap_or_else(|_| default_save.clone());
+        let resolved_save = fs::canonicalize(&save).unwrap_or_else(|_| save.clone());
+        if ["Pending", "Transfer", "Capture"]
+            .iter()
+            .any(|name| resolved_save.starts_with(root.join(name)))
+        {
+            save = default_save;
+        }
         let transfer = root.join("Transfer");
         fs::create_dir_all(&transfer)?;
         for path in image_paths(&transfer)? {
@@ -98,7 +105,12 @@ impl State {
                 .elapsed()
                 .unwrap_or_default();
             if age >= Duration::from_secs(60) {
-                fs::remove_file(path)?;
+                if let Err(error) = fs::remove_file(&path) {
+                    eprintln!("Transfer cleanup: {error}");
+                }
+            } else {
+                let remaining = Duration::from_secs(60).saturating_sub(age).as_millis() as u64;
+                unsafe { shelf_schedule_transfer_cleanup(cstring(&path).as_ptr(), remaining) };
             }
         }
         let pending = image_paths(&root.join("Pending"))?;
@@ -107,7 +119,10 @@ impl State {
             .and_then(|s| s.parse::<u64>().ok())
             .and_then(|s| UNIX_EPOCH.checked_add(Duration::from_secs(s)))
             .unwrap_or(UNIX_EPOCH);
-        let known = image_paths(&capture)?.into_iter().collect();
+        let known = image_paths(&capture)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let selected = pending.len().saturating_sub(1);
         Ok(Self {
             root,
@@ -291,6 +306,60 @@ impl State {
     }
 }
 
+/// Import the image written by the app-owned native capture task.
+///
+/// # Safety
+/// `path` must be a valid null-terminated file path for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rs_accept_capture(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let source = PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { CStr::from_ptr(path) }.to_bytes(),
+    ));
+    STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(state) = state.as_mut() else {
+            return 0;
+        };
+        let result = (|| -> io::Result<()> {
+            if source.parent() != Some(state.root.join("Capture").as_path())
+                || !fs::symlink_metadata(&source)?.file_type().is_file()
+                || unsafe { shelf_image_ready(cstring(&source).as_ptr()) } == 0
+            {
+                return Err(io::Error::other(
+                    "The capture did not produce a complete image.",
+                ));
+            }
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let target = state.root.join("Pending").join(format!(
+                "{stamp}-{}",
+                source.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            state.touch();
+            fs::rename(&source, &target)?;
+            unsafe { shelf_capture_arrived(cstring(&target).as_ptr()) };
+            state.pending.push(target);
+            state.selected = state.pending.len() - 1;
+            state.render();
+            Ok(())
+        })();
+        match result {
+            Ok(()) => 1,
+            Err(error) => {
+                report(error);
+                state.render();
+                0
+            }
+        }
+    })
+}
+
 // AppKit calls these functions on the main thread. The adapter never holds Rust state.
 #[unsafe(no_mangle)]
 pub extern "C" fn rs_scan() -> c_int {
@@ -375,8 +444,19 @@ pub unsafe extern "C" fn rs_save_folder(path: *const c_char) {
     ));
     STATE.with(|cell| {
         if let Some(state) = cell.borrow_mut().as_mut() {
-            if path == state.capture || path.starts_with(state.root.join("Pending")) {
-                report("Select a save folder outside the capture and pending folders.");
+            let resolved = match fs::canonicalize(&path) {
+                Ok(path) => path,
+                Err(error) => {
+                    report(error);
+                    return;
+                }
+            };
+            let temporary = ["Pending", "Transfer", "Capture"].iter().any(|name| {
+                let folder = state.root.join(name);
+                resolved.starts_with(fs::canonicalize(&folder).unwrap_or(folder))
+            });
+            if temporary {
+                report("Select a save folder outside the temporary app folders.");
                 return;
             }
             if let Err(error) =
@@ -401,6 +481,10 @@ pub extern "C" fn rs_restore() {
 }
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--enable-login") {
+        let status = unsafe { shelf_enable_login() };
+        std::process::exit(status);
+    }
     let state = match State::new() {
         Ok(state) => state,
         Err(error) => {

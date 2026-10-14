@@ -36,7 +36,13 @@ fn main() {
         .arg(object));
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=shelf");
-    for framework in ["AppKit", "ImageIO", "CoreGraphics", "ServiceManagement"] {
+    for framework in [
+        "AppKit",
+        "ImageIO",
+        "CoreGraphics",
+        "ServiceManagement",
+        "ApplicationServices",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=26.0");

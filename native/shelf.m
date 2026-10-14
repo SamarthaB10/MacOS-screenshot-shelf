@@ -5,12 +5,14 @@
 #import <unistd.h>
 #import <sys/xattr.h>
 #import <sys/clonefile.h>
+#import <ApplicationServices/ApplicationServices.h>
 
 extern int rs_scan(void);
 extern void rs_action(int action);
 extern void rs_tick(void);
 extern void rs_restore(void);
 extern void rs_save_folder(const char *path);
+extern int rs_accept_capture(const char *path);
 
 // The configured folder remains owned by macOS. Return a stable UTF-8 path to Rust.
 const char *shelf_capture_folder(void) {
@@ -64,14 +66,43 @@ int shelf_image_ready(const char *path) {
 @property(strong) NSButton *previous;
 @property(strong) NSButton *next;
 @property(strong) NSStatusItem *statusItem;
+@property(strong) NSMenuItem *captureMode;
 @property(strong) NSTimer *expiryTimer;
 @property(strong) dispatch_source_t watcher;
 @property(copy) NSString *capture;
 @property(copy) NSString *save;
 @property BOOL scanScheduled;
+@property BOOL capturing;
+@property CFMachPortRef shortcutTap;
+@property CFRunLoopSourceRef shortcutSource;
+@property(strong) NSTimer *permissionTimer;
+@property(strong) NSTask *captureTask;
+- (void)takeScreenshot:(id)sender;
+- (void)enableFastCapture:(id)sender;
+- (BOOL)installFastCapture;
+
 @end
 
 static ShelfDelegate *app;
+
+static CGEventRef shortcutEvent(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *context) {
+    (void)proxy; (void)context;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (app.shortcutTap) CGEventTapEnable(app.shortcutTap, true);
+        return event;
+    }
+    CGEventFlags flags = CGEventGetFlags(event);
+    int64_t key = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    CGEventFlags required = kCGEventFlagMaskCommand | kCGEventFlagMaskShift;
+    if (type == kCGEventKeyDown && (flags & required) == required &&
+        !(flags & (kCGEventFlagMaskControl | kCGEventFlagMaskAlternate)) && key == 21) {
+        if (!CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat)) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [app takeScreenshot:nil]; });
+        }
+        return NULL;
+    }
+    return event;
+}
 
 @implementation ShelfPreview
 - (BOOL)mouseDownCanMoveWindow { return NO; }
@@ -97,6 +128,7 @@ static ShelfDelegate *app;
         shelf_error(error.localizedDescription.UTF8String);
         return;
     }
+    [files setAttributes:@{NSFileModificationDate: NSDate.date} ofItemAtPath:transfer error:NULL];
     self.dragURL = [NSURL fileURLWithPath:transfer];
     self.dragData = [NSData dataWithContentsOfURL:self.dragURL options:NSDataReadingMappedIfSafe error:&error];
     if (!self.dragData) {
@@ -160,16 +192,20 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     (void)notification;
     [self createPanel];
     [self createMenu];
+    [self installFastCapture];
+    // Permission prompts must come from an explicit setup action, not every launch.
     int descriptor = open(self.capture.fileSystemRepresentation, O_EVTONLY);
     if (descriptor < 0) {
         extern void shelf_error(const char *);
-        shelf_error("Cannot watch the capture folder. Quit and reopen the app.");
+        NSLog(@"Screenshot folder unavailable; direct capture remains available.");
+        rs_restore();
         return;
     }
     self.watcher = dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, descriptor,
         DISPATCH_VNODE_WRITE | DISPATCH_VNODE_RENAME | DISPATCH_VNODE_DELETE, dispatch_get_main_queue());
     __weak ShelfDelegate *weakSelf = self;
     dispatch_source_set_event_handler(self.watcher, ^{
+        if (!weakSelf.shortcutTap) return;
         unsigned long flags = dispatch_source_get_data(weakSelf.watcher);
         if (flags & (DISPATCH_VNODE_RENAME | DISPATCH_VNODE_DELETE)) {
             extern void shelf_error(const char *);
@@ -236,7 +272,12 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSSquareStatusItemLength];
     self.statusItem.button.image = [NSImage imageWithSystemSymbolName:@"square.stack.3d.up" accessibilityDescription:@"Screenshot Shelf"];
     NSMenu *menu = [[NSMenu alloc] init];
+    self.captureMode = [[NSMenuItem alloc] initWithTitle:@"Fast capture off — enable permissions" action:nil keyEquivalent:@""];
+    [menu addItem:self.captureMode];
+    [menu addItem:NSMenuItem.separatorItem];
     NSArray *items = @[
+        @[@"Take screenshot  ⇧⌘4", NSStringFromSelector(@selector(takeScreenshot:))],
+        @[@"Enable fast capture…", NSStringFromSelector(@selector(enableFastCapture:))],
         @[@"Setup…", NSStringFromSelector(@selector(setup:))],
         @[@"Choose save folder…", NSStringFromSelector(@selector(chooseSave:))],
         @[@"Open capture folder", NSStringFromSelector(@selector(openCapture:))],
@@ -250,6 +291,99 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
         [menu addItem:item];
     }
     self.statusItem.menu = menu;
+}
+- (BOOL)installFastCapture {
+    if (self.shortcutTap) return YES;
+    if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess()) return NO;
+    self.shortcutTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
+        CGEventMaskBit(kCGEventKeyDown), shortcutEvent, NULL);
+    if (!self.shortcutTap) return NO;
+    self.shortcutSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, self.shortcutTap, 0);
+    if (!self.shortcutSource) {
+        CFRelease(self.shortcutTap);
+        self.shortcutTap = NULL;
+        return NO;
+    }
+    CFRunLoopAddSource(CFRunLoopGetMain(), self.shortcutSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(self.shortcutTap, true);
+    self.statusItem.button.toolTip = @"Screenshot Shelf — fast capture ready (⇧⌘4)";
+    self.captureMode.title = @"Fast capture ready  ⇧⌘4";
+    [self.permissionTimer invalidate];
+    self.permissionTimer = nil;
+    return YES;
+}
+- (void)enableFastCapture:(id)sender {
+    (void)sender;
+    if ([self installFastCapture]) return;
+    NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt: @YES};
+    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+    if (!CGPreflightScreenCaptureAccess()) CGRequestScreenCaptureAccess();
+    self.statusItem.button.toolTip = @"Screenshot Shelf — allow Accessibility and Screen Recording for fast capture";
+    if (!self.permissionTimer) {
+        __weak ShelfDelegate *weakSelf = self;
+        self.permissionTimer = [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
+            (void)timer;
+            [weakSelf installFastCapture];
+        }];
+        self.permissionTimer.tolerance = 0.5;
+    }
+}
+- (void)takeScreenshot:(id)sender {
+    (void)sender;
+    if (self.capturing || self.preview.dragURL) return;
+    if (!CGPreflightScreenCaptureAccess()) {
+        [self enableFastCapture:nil];
+        return;
+    }
+    rs_action(7);
+    self.capturing = YES;
+    [self.panel orderOut:nil];
+    [self.expiryTimer invalidate];
+    self.expiryTimer = nil;
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Screenshot Shelf/Capture"];
+    NSError *error = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error]) {
+        self.capturing = NO;
+        extern void shelf_error(const char *);
+        shelf_error(error.localizedDescription.UTF8String);
+        rs_restore();
+        return;
+    }
+    NSString *output = [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"Screenshot-%@.png", NSUUID.UUID.UUIDString]];
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/screencapture"];
+    // Capture directly into app-owned storage. No macOS floating thumbnail or
+    // desktop-file watcher lies between selection completion and the widget.
+    task.arguments = @[@"-i", @"-x", @"-t", @"png", output];
+    __weak ShelfDelegate *weakSelf = self;
+    task.terminationHandler = ^(NSTask *finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ShelfDelegate *owner = weakSelf;
+            owner.capturing = NO;
+            owner.captureTask = nil;
+            BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:output];
+            if (finished.terminationStatus == 0 && exists) {
+                rs_accept_capture(output.fileSystemRepresentation);
+            } else {
+                [NSFileManager.defaultManager removeItemAtPath:output error:NULL];
+                rs_restore();
+            }
+        });
+    };
+    self.captureTask = task;
+    if (![task launchAndReturnError:&error]) {
+        self.capturing = NO;
+        self.captureTask = nil;
+        extern void shelf_error(const char *);
+        shelf_error(error.localizedDescription.UTF8String);
+        rs_restore();
+    }
+}
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    (void)notification;
+    [self.captureTask terminate];
+    if (self.shortcutTap) { CGEventTapEnable(self.shortcutTap, false); CFRelease(self.shortcutTap); }
+    if (self.shortcutSource) { CFRunLoopRemoveSource(CFRunLoopGetMain(), self.shortcutSource, kCFRunLoopCommonModes); CFRelease(self.shortcutSource); }
 }
 - (void)scheduleScan {
     if (self.scanScheduled) return;
@@ -323,6 +457,33 @@ static NSButton *button(NSString *title, NSString *symbol, NSRect frame, id targ
 }
 - (void)quit:(id)sender { (void)sender; [NSApp terminate:nil]; }
 @end
+
+void shelf_schedule_transfer_cleanup(const char *path, uint64_t delay_ms) {
+    @autoreleasepool {
+        NSString *file = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:path length:strlen(path)];
+        NSURL *url = [NSURL fileURLWithPath:file];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay_ms * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
+        });
+    }
+}
+
+int shelf_enable_login(void) {
+    @autoreleasepool {
+        NSError *error = nil;
+        SMAppService *service = SMAppService.mainAppService;
+        if (service.status == SMAppServiceStatusEnabled) return 0;
+        if (![service registerAndReturnError:&error]) {
+            fprintf(stderr, "Start at login: %s\n", error.localizedDescription.UTF8String);
+            return 1;
+        }
+        if (service.status == SMAppServiceStatusRequiresApproval) {
+            [SMAppService openSystemSettingsLoginItems];
+            return 2;
+        }
+        return 0;
+    }
+}
 
 void shelf_capture_arrived(const char *path) {
     if (!app.panel) return;
