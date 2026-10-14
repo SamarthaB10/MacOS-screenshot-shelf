@@ -79,7 +79,12 @@ impl State {
             unsafe { CStr::from_ptr(shelf_capture_folder()) }.to_bytes(),
         ));
         let default_save = home.join("Pictures/Screenshot Shelf/Saved");
-        for directory in [&root, &root.join("Pending"), &capture, &default_save] {
+        if !capture.is_absolute() || !capture.is_dir() {
+            return Err(io::Error::other(
+                "The macOS screenshot folder is not available. Select a valid folder in Shift–Command–5 → Options.",
+            ));
+        }
+        for directory in [&root, &root.join("Pending"), &default_save] {
             fs::create_dir_all(directory)?;
         }
         let save = fs::read_to_string(root.join("save-folder"))

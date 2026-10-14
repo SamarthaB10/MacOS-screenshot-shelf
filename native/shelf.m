@@ -13,13 +13,15 @@ extern void rs_save_folder(const char *path);
 
 // The configured folder remains owned by macOS. Return a stable UTF-8 path to Rust.
 const char *shelf_capture_folder(void) {
-    static NSString *folder;
+    static char *folderBytes;
     @autoreleasepool {
         id value = (__bridge_transfer id)CFPreferencesCopyAppValue(CFSTR("location"), CFSTR("com.apple.screencapture"));
-        folder = [value isKindOfClass:NSString.class] && [value length] > 0
+        NSString *folder = [value isKindOfClass:NSString.class] && [value length] > 0
             ? [value stringByExpandingTildeInPath]
             : [NSHomeDirectory() stringByAppendingPathComponent:@"Desktop"];
-        return folder.fileSystemRepresentation;
+        free(folderBytes);
+        folderBytes = strdup(folder.fileSystemRepresentation);
+        return folderBytes;
     }
 }
 
