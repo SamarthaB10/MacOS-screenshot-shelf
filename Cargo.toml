@@ -1,0 +1,12 @@
+[package]
+name = "screenshot-shelf"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
